@@ -4,15 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import random
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
+from PIL import Image
 
 
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.bn2 = nn.BatchNorm2d(64)
         self.dropout1 = nn.Dropout2d(0.25)
         self.dropout2 = nn.Dropout2d(0.5)
         self.fc1 = nn.Linear(9216, 128)
@@ -20,8 +24,10 @@ class Net(nn.Module):
 
     def forward(self, x):
         x = self.conv1(x)
+        x = self.bn1(x)
         x = F.relu(x)
         x = self.conv2(x)
+        x = self.bn2(x)
         x = F.relu(x)
         x = F.max_pool2d(x, 2)
         x = self.dropout1(x)
@@ -68,6 +74,50 @@ def test(args, model, device, test_loader):
         100. * correct / len(test_loader.dataset)))
 
 
+class MyDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        data,
+        targets,
+        train: bool = True,
+        transform = None,
+        target_transform = None
+    ) -> None:
+        super(MyDataset, self).__init__()
+        self.train = train
+        self.data = data
+        self.targets = targets
+        self.transform = transform
+        self.target_transform = target_transform
+
+    def __getitem__(self, index: int):
+        img, target = self.data[index], int(self.targets[index])
+        img = Image.fromarray(img.numpy(), mode='L')
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+def load_data(path):
+    data, targets = torch.load(path)
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+        ])
+    n_sample = data.shape[0]
+    features = torch.zeros(data.shape)
+    for i in range(n_sample):
+        img = Image.fromarray(data[i].numpy(), mode='L')
+        img = transform(img)
+        features[i] = img
+    return features, targets
+    
+
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
@@ -94,10 +144,60 @@ def main():
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
 
     device = torch.device("cuda" if use_cuda else "cpu")
-
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    
+    train_data, train_targets = torch.load('../data/MNIST/processed/training.pt')
+    test_data, test_targets = torch.load('../data/MNIST/processed/test.pt')
+    data = torch.cat([train_data, test_data], dim=0)
+    targets = torch.cat([train_targets, test_targets], dim=0)
+    trainset_ids = []
+    testset_ids = []
+    # print(data.shape[0])
+    # print(torch.arange(10))
+
+    for class_id in range(max(targets)+1):
+        # sample_mask = targets == class_id
+        # sample_data = data[sample_mask]
+        # sample_targets = targets[sample_mask]
+        sample_ids = torch.arange(data.shape[0])[targets == class_id]
+        sample_ids = sample_ids.numpy().tolist()
+        random.shuffle(sample_ids)
+        train_ids = sample_ids[:class_id*500+1000]
+        test_ids = sample_ids[class_id*500+1000: class_id*500+2000]
+        # train_ids = sample_ids[:3250]
+        # test_ids = sample_ids[3250: 4250]
+        trainset_ids += train_ids
+        testset_ids += test_ids
+    print(len(trainset_ids), len(testset_ids))
+    train_data = data[trainset_ids]
+    train_targets = targets[trainset_ids]
+    test_data = data[testset_ids]
+    test_targets = targets[testset_ids]
+    print(train_data.shape, train_targets.shape)
+    print(test_data.shape, test_targets.shape)
+
+    train_loader = torch.utils.data.DataLoader(
+        MyDataset(data=train_data, targets=train_targets, train=True,
+                transform=transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.1307,), (0.3081,))
+                ])),
+        batch_size=args.batch_size, shuffle=True, **kwargs
+    )
+    test_loader = torch.utils.data.DataLoader(
+        MyDataset(data=test_data, targets=test_targets, train=False,
+                transform=transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.1307,), (0.3081,))
+                ])),
+        batch_size=args.batch_size, shuffle=False, **kwargs
+    )
+
+
+    '''
     train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('../data', train=True, download=True,
                        transform=transforms.Compose([
@@ -111,7 +211,7 @@ def main():
                            transforms.Normalize((0.1307,), (0.3081,))
                        ])),
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
-
+    '''
     model = Net().to(device)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
